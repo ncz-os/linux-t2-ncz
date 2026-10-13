@@ -1,0 +1,95 @@
+From: Jason Perlow <jperlow@gmail.com>
+Subject: [PATCH] PCI/AER: skip ANFE unmask on the Apple T2 Secure Enclave (106b:1802)
+
+eddba19b8b5f ("PCI/AER: Support Advisory Non-Fatal Errors") unmasked the
+Advisory Non-Fatal Error bit in the AER Correctable Error Mask of every
+device on enumeration.  On a MacBookPro16,1 (Intel Cannon Lake PCH, Apple
+T2 Secure Enclave 106b:1802) doing this causes the machine to lose power
+shortly after boot, before any user-space console appears.  No panic, no
+oops, no log line: the box just goes dark.
+
+Wunner's 79c168e2aa95 ("PCI/AER: Skip error recovery on false alarms",
+arrive with v7.3-rc7) prevents the recovery path from running when the
+Root Port raised a false Firmware First alarm, which stops the
+Navi10/amdgpu probe regression Alex reported but does NOT prevent the T2
+Secure Enclave from being enumerated with its ANFE bit unmasked.  This
+quirk targets the SEP specifically: it leaves the SEP's ANFE bit masked
+while the rest of the platform is unchanged.
+
+The SEP is a PCIe function on the T2 chipset; on a MacBookPro16,1 the
+host bridge owns the ANFE bit for child devices through the AER mask.
+Leaving the SEP bit masked is what the pre-7.3 behaviour effectively was
+(eddba19b8b5f is what set it).  Hardware tested 2026-10-09 on
+two MacBookPro16,1 units as a 7.3.0-rc6 test kernel (GUI,
+suspend/resume, cold start confirmed, 2h+ stable) on top of Wunner's
+79c168e2aa95.
+
+The quirk is registered as DECLARE_PCI_FIXUP_EARLY so it runs before
+pci_aer_init() looks at the device.  A new pci_dev.no_aer_anfe bit (1
+bit) is the predicate pci_aer_init() checks; it does not touch any
+existing field, struct layout or genksyms signature, so the change is
+isolated to pci.h/aer.c/quirks.c.
+
+Drop the quirk when either (a) the SEP ships firmware handling the
+unmask without powering off, or (b) upstream grows a per-device ANFE
+disable in pci_aer_init() with a non-quirk mechanism (an upstream
+ANFE-disable-tree option would also be sufficient).
+
+Not mainline yet: no_aer_anfe is absent from torvalds/master quirks.c,
+pci.h and aer.c, and from pci.git for-linus/next as of 2026-10-11
+(sha256 of the clean patch
+600a28f7fce5ca7687086127e05737fbe7c7cadf9a0c06b797d5ed2f0e6faac5).
+The Wunner fix that lands with v7.3-rc7 is a recovery-path guard, not a
+device-enumeration guard; the T2 SEP still needs this enumeration-side
+quirk.
+
+Jason Perlow <jperlow@gmail.com>
+---
+diff --git a/drivers/pci/pcie/aer.c b/drivers/pci/pcie/aer.c
+index 922a726a52a5..732f75a31760 100644
+--- a/drivers/pci/pcie/aer.c
++++ b/drivers/pci/pcie/aer.c
+@@ -428,7 +428,8 @@ void pci_aer_init(struct pci_dev *dev)
+ 	 * Advisory Non-Fatal Errors are masked by default (PCIe r7.0, sec
+ 	 * 7.8.4.6).
+ 	 */
+-	if (pcie_aer_is_native(dev) && dev->devcap & PCI_EXP_DEVCAP_RBER)
++	if (pcie_aer_is_native(dev) && dev->devcap & PCI_EXP_DEVCAP_RBER &&
++	    !dev->no_aer_anfe)
+ 		pci_clear_and_set_config_dword(dev,
+ 					       dev->aer_cap + PCI_ERR_COR_MASK,
+ 					       PCI_ERR_COR_ADV_NFAT, 0);
+diff --git a/drivers/pci/quirks.c b/drivers/pci/quirks.c
+index de9bbccda21f..677cd8797d19 100644
+--- a/drivers/pci/quirks.c
++++ b/drivers/pci/quirks.c
+@@ -2574,6 +2574,17 @@ static void quirk_p64h2_1k_io(struct pci_dev *dev)
+ }
+ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1460, quirk_p64h2_1k_io);
+ 
++/*
++ * Unmasking Advisory Non-Fatal Errors on the Apple T2 Secure Enclave
++ * causes a MacBookPro16,1 to lose power.  Set this before pci_aer_init()
++ * so that it leaves the ANFE mask bit unchanged.
++ */
++static void quirk_no_aer_anfe(struct pci_dev *dev)
++{
++	dev->no_aer_anfe = 1;
++}
++DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_APPLE, 0x1802, quirk_no_aer_anfe);
++
+ /*
+  * Under some circumstances, AER is not linked with extended capabilities.
+  * Force it to be linked by setting the corresponding control bit in the
+diff --git a/include/linux/pci.h b/include/linux/pci.h
+index d31a8d107b1e..5ffcf5ce8c96 100644
+--- a/include/linux/pci.h
++++ b/include/linux/pci.h
+@@ -467,6 +467,7 @@ struct pci_dev {
+ 
+ 	unsigned int	is_busmaster:1;		/* Is busmaster */
+ 	unsigned int	no_msi:1;		/* May not use MSI */
++	unsigned int	no_aer_anfe:1;		/* Do not unmask ANFE */
+ 	unsigned int	block_cfg_access:1;	/* Config space access blocked */
+ 	unsigned int	broken_parity_status:1;	/* Generates false positive parity */
+ 	unsigned int	irq_reroute_variant:2;	/* Needs IRQ rerouting variant */

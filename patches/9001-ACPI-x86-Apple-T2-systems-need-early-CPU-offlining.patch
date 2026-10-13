@@ -1,0 +1,287 @@
+From ccb4c5eb64213b5fd0876b27dac86b2f1bbd6e2b Mon Sep 17 00:00:00 2001
+From: Andre Eikmeyer <dev@deq.rocks>
+Date: Fri, 24 Jul 2026 17:37:27 +0200
+Subject: [PATCH] ACPI: x86: Apple T2 systems need early CPU offlining
+
+Linux reports _OSI("Darwin") on x86 Apple systems. On T2 Macs, the
+selected firmware suspend path makes secondary CPU startup during early
+resume take several seconds per CPU. The same CPUs can be brought online
+normally after platform resume.
+
+We therefore move secondary CPU hotplug outside the generic CPU PM
+notifier window on systems exposing the Apple T2 PCI bridge. A prepare
+notifier runs before the CPU core blocks hotplug, while a post notifier
+restores only the CPUs it removed after the core enables hotplug again.
+
+This reduces CPU bring-up during resume from several seconds per CPU to a
+fraction of a second. The change was tested on MacBookPro15,1,
+MacBookPro16,2, MacBookAir9,1 and a 27-inch T2 iMac.
+
+Local changes (NCZ-OS, 2026-10-06): zero-initialize the ownership mask;
+serialize the offline/restore sequence with device_hotplug_lock; and also
+restore the offlined CPUs from a deferred work item on the
+PM_SUSPEND_PREPARE rollback path, so they are never brought online before
+the core CPU-hotplug notifier has re-enabled hotplug.  The original
+change is by Andre Eikmeyer; these local edits are not his.
+
+Signed-off-by: Andre Eikmeyer <dev@deq.rocks>
+---
+ drivers/acpi/x86/apple.c | 238 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 238 insertions(+)
+
+diff --git a/drivers/acpi/x86/apple.c b/drivers/acpi/x86/apple.c
+index 45d0f16f374f..487ba6338675 100644
+--- a/drivers/acpi/x86/apple.c
++++ b/drivers/acpi/x86/apple.c
+@@ -6,8 +6,17 @@
+ 
+ #include <linux/acpi.h>
+ #include <linux/bitmap.h>
++#include <linux/cpu.h>
++#include <linux/cpuhplock.h>
++#include <linux/device.h>
++#include <linux/init.h>
++#include <linux/mutex.h>
++#include <linux/notifier.h>
++#include <linux/pci.h>
+ #include <linux/platform_data/x86/apple.h>
++#include <linux/suspend.h>
+ #include <linux/uuid.h>
++#include <linux/workqueue.h>
+ #include "../internal.h"
+ 
+ /* Apple _DSM device properties GUID */
+@@ -145,4 +154,233 @@
+ out_free:
+ 	ACPI_FREE(props);
+ 	bitmap_free(valid);
++}
++
++#ifdef CONFIG_PM_SLEEP_SMP
++#define PCI_DEVICE_ID_APPLE_T2_BRIDGE 0x1801
++
++/*
++ * The ACPI path selected by _OSI("Darwin") leaves Apple T2 systems in a
++ * state where bringing secondary CPUs online during early resume may take
++ * several seconds per CPU. Normal CPU hotplug after platform resume is not
++ * affected, so move it outside the generic suspend CPU hotplug window.
++ *
++ * Local modification (NCZ-OS, 2026-10-06), relative to the original by
++ * Andre Eikmeyer:
++ *
++ *   - the ownership mask is zero-initialized, so an empty mask is never
++ *     mistaken for "every CPU is ours" under CONFIG_CPUMASK_OFFSTACK;
++ *
++ *   - the whole offline/restore sequence is serialized with
++ *     device_hotplug_lock, and the online mask is sampled under
++ *     cpus_read_lock().  remove_cpu()/add_cpu() are deliberately not used
++ *     here: they take device_hotplug_lock themselves, so they cannot be used
++ *     to serialize a sequence, and wrapping them in cpus_read_lock() would
++ *     deadlock against the cpus_write_lock() taken by _cpu_down().  Neither
++ *     lock is held while cpus_read_lock() is held.
++ *
++ *   - a failed PM_SUSPEND_PREPARE only rolls back the notifiers that ran
++ *     before the failing one (notifier_call_chain_robust()), so a failure
++ *     below the low-priority restore notifier never reaches it.  The prepare
++ *     notifier therefore also arms a work item on PM_POST_SUSPEND; it runs
++ *     after the notifier chain, i.e. after the core CPU-hotplug notifier has
++ *     re-enabled hotplug, so CPUs are never onlined before hotplug is
++ *     available again.
++ */
++static cpumask_var_t apple_t2_offlined_cpus;
++static cpumask_var_t apple_t2_online_snapshot;
++static DEFINE_MUTEX(apple_t2_cpu_lock);
++static struct delayed_work apple_t2_restore_work;
++static unsigned int apple_t2_restore_retries;
++
++#define APPLE_T2_RESTORE_RETRIES	5
++
++/* Caller must hold apple_t2_cpu_lock. */
++static void apple_t2_restore_cpus(void)
++{
++	unsigned int cpu;
++
++	lock_device_hotplug();
++	for_each_cpu(cpu, apple_t2_offlined_cpus) {
++		struct device *dev = get_cpu_device(cpu);
++		int ret;
++
++		if (!dev) {
++			cpumask_clear_cpu(cpu, apple_t2_offlined_cpus);
++			continue;
++		}
++
++		ret = device_online(dev);
++		if (ret < 0) {
++			pr_err("ACPI: Apple T2 failed to restore CPU%u: %d\n",
++			       cpu, ret);
++			continue;
++		}
++
++		cpumask_clear_cpu(cpu, apple_t2_offlined_cpus);
++	}
++	unlock_device_hotplug();
++}
++
++static void apple_t2_restore_work_fn(struct work_struct *work)
++{
++	mutex_lock(&apple_t2_cpu_lock);
++
++	apple_t2_restore_cpus();
++
++	if (cpumask_empty(apple_t2_offlined_cpus)) {
++		apple_t2_restore_retries = 0;
++	} else if (++apple_t2_restore_retries <= APPLE_T2_RESTORE_RETRIES) {
++		schedule_delayed_work(&apple_t2_restore_work,
++				      msecs_to_jiffies(10));
++	} else {
++		pr_err("ACPI: Apple T2 could not restore CPUs after %u attempts\n",
++		       apple_t2_restore_retries);
++		apple_t2_restore_retries = 0;
++	}
++
++	mutex_unlock(&apple_t2_cpu_lock);
++}
++
++static void apple_t2_offline_cpus(void)
++{
++	unsigned int cpu;
++
++	mutex_lock(&apple_t2_cpu_lock);
++
++	if (!cpumask_empty(apple_t2_offlined_cpus)) {
++		pr_err("ACPI: Apple T2 CPUs from the previous suspend remain offline\n");
++		apple_t2_restore_cpus();
++		if (!cpumask_empty(apple_t2_offlined_cpus)) {
++			pr_err("ACPI: Apple T2 early CPU offlining skipped\n");
++			mutex_unlock(&apple_t2_cpu_lock);
++			return;
++		}
++	}
++
++	/*
++	 * Take a stable snapshot of the online mask; the device hotplug
++	 * sequence below is then serialized against sysfs hotplug by
++	 * device_hotplug_lock and re-checks cpu_online() per CPU.
++	 */
++	cpumask_clear(apple_t2_online_snapshot);
++	cpus_read_lock();
++	cpumask_copy(apple_t2_online_snapshot, cpu_online_mask);
++	cpus_read_unlock();
++
++	lock_device_hotplug();
++	for_each_cpu(cpu, apple_t2_online_snapshot) {
++		struct device *dev;
++		int ret;
++
++		if (cpu == 0 || !cpu_online(cpu))
++			continue;
++
++		dev = get_cpu_device(cpu);
++		if (!dev)
++			continue;
++
++		ret = device_offline(dev);
++		if (ret) {
++			/* 0 = offlined by us; nonzero: already offline/error */
++			if (ret < 0)
++				pr_err("ACPI: Apple T2 failed to offline CPU%u: %d\n",
++				       cpu, ret);
++			continue;
++		}
++
++		cpumask_set_cpu(cpu, apple_t2_offlined_cpus);
++	}
++	unlock_device_hotplug();
++
++	mutex_unlock(&apple_t2_cpu_lock);
+ }
++
++static int apple_t2_cpu_prepare(struct notifier_block *nb,
++				unsigned long action, void *unused)
++{
++	if (action == PM_SUSPEND_PREPARE) {
++		apple_t2_offline_cpus();
++	} else if (action == PM_POST_SUSPEND &&
++		   !cpumask_empty(apple_t2_offlined_cpus)) {
++		/*
++		 * Arm the deferred restoration as a backstop for the
++		 * notifier-chain rollback path (see above).  If the
++		 * low-priority notifier does run it will have restored the
++		 * CPUs first and the work item becomes a no-op.
++		 */
++		schedule_delayed_work(&apple_t2_restore_work, 0);
++	}
++
++	return NOTIFY_OK;
++}
++
++static int apple_t2_cpu_restore(struct notifier_block *nb,
++				unsigned long action, void *unused)
++{
++	if (action == PM_POST_SUSPEND) {
++		mutex_lock(&apple_t2_cpu_lock);
++		apple_t2_restore_cpus();
++		mutex_unlock(&apple_t2_cpu_lock);
++	}
++
++	return NOTIFY_OK;
++}
++
++/*
++ * The CPU core hotplug PM notifier runs at priority 0.  Offline CPUs before
++ * it blocks hotplug, then restore them after it enables hotplug again.
++ */
++static struct notifier_block apple_t2_cpu_prepare_nb = {
++	.notifier_call = apple_t2_cpu_prepare,
++	.priority = 1,
++};
++
++static struct notifier_block apple_t2_cpu_restore_nb = {
++	.notifier_call = apple_t2_cpu_restore,
++	.priority = -1,
++};
++
++static int __init apple_t2_cpu_pm_init(void)
++{
++	struct pci_dev *t2;
++	int ret;
++
++	if (!x86_apple_machine)
++		return 0;
++
++	t2 = pci_get_device(PCI_VENDOR_ID_APPLE,
++			    PCI_DEVICE_ID_APPLE_T2_BRIDGE, NULL);
++	if (!t2)
++		return 0;
++	pci_dev_put(t2);
++
++	if (!zalloc_cpumask_var(&apple_t2_offlined_cpus, GFP_KERNEL))
++		return -ENOMEM;
++
++	if (!zalloc_cpumask_var(&apple_t2_online_snapshot, GFP_KERNEL)) {
++		free_cpumask_var(apple_t2_offlined_cpus);
++		return -ENOMEM;
++	}
++
++	INIT_DELAYED_WORK(&apple_t2_restore_work, apple_t2_restore_work_fn);
++
++	ret = register_pm_notifier(&apple_t2_cpu_prepare_nb);
++	if (ret)
++		goto free_snapshot;
++
++	ret = register_pm_notifier(&apple_t2_cpu_restore_nb);
++	if (ret)
++		goto unregister_prepare;
++
++	return 0;
++
++unregister_prepare:
++	unregister_pm_notifier(&apple_t2_cpu_prepare_nb);
++free_snapshot:
++	free_cpumask_var(apple_t2_online_snapshot);
++	free_cpumask_var(apple_t2_offlined_cpus);
++	return ret;
++}
++late_initcall(apple_t2_cpu_pm_init);
++#endif

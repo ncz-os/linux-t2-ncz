@@ -1,0 +1,84 @@
+From: Jason Perlow <jperlow@gmail.com>
+Subject: [PATCH] Bluetooth: btbcm: identify BCM4364B3 and quiet its expected ROM patchram miss
+
+On Apple T2 Macs the combo Bluetooth is a UART (hci_uart + btbcm) Broadcom
+chip, e.g. BCM4364B3 on MacBookPro16,1.  Two bootstrap issues show up there
+on every boot:
+
+1. bcm_uart_subver_table[] has no entry for LMP subver 0x3032, so the chip
+   is logged as a nameless "BCM (001.016.050) build NNNN" and the firmware
+   lookup falls back to the generic "brcm/BCM.hcd".  Add the entry; the
+   driver then names the controller and asks for "brcm/BCM4364B3.hcd".
+
+2. The chip runs on ROM firmware and Apple ships no redistributable
+   patchram, so neither the chip-specific nor the generic "brcm/BCM.hcd"
+   exists and btbcm_initialize() logs two error-level lines:
+
+       Bluetooth: hci0: BCM: firmware Patch file not found, tried:
+       Bluetooth: hci0: BCM: 'brcm/BCM.hcd'
+
+   The controller is fully functional without the patch (Bluetooth comes up
+   and pairs), so this is expected on these machines, not a packing defect.
+   Report it at info level for the Apple T2 DMI set.
+
+The Apple-T2 DMI table is renamed from disable_broken_read_transmit_power
+because a second quirk is now keyed off it; the "Read LE Min/Max Tx Power"
+quirk it already drove is unchanged.  Non-T2 machines keep the error-level
+message, so a genuinely missing firmware file is still surfaced there.
+
+Signed-off-by: Jason Perlow <jperlow@gmail.com>
+---
+diff --git a/drivers/bluetooth/btbcm.c b/drivers/bluetooth/btbcm.c
+index 463d598..3395e7c 100644
+--- a/drivers/bluetooth/btbcm.c
++++ b/drivers/bluetooth/btbcm.c
+@@ -390,7 +390,14 @@ static struct sk_buff *btbcm_read_usb_product(struct hci_dev *hdev)
+ 	return skb;
+ }
+ 
+-static const struct dmi_system_id disable_broken_read_transmit_power[] = {
++/*
++ * Apple T2 Macs with a UART-attached Broadcom combo chip (BCM4364 class, e.g.
++ * MacBookPro16,1).  Two quirks are keyed off this list: the controller's
++ * "Read LE Min/Max Tx Power" command is broken, and the chip runs on ROM
++ * firmware whose patchram ("brcm/BCM.hcd") Apple does not make redistributable,
++ * so the driver's firmware request is expected to miss.
++ */
++static const struct dmi_system_id apple_t2_dmi[] = {
+ 	{
+ 		 .matches = {
+ 			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
+@@ -464,7 +471,7 @@ static int btbcm_print_controller_features(struct hci_dev *hdev)
+ 	kfree_skb(skb);
+ 
+ 	/* Read DMI and disable broken Read LE Min/Max Tx Power */
+-	if (dmi_first_match(disable_broken_read_transmit_power))
++	if (dmi_first_match(apple_t2_dmi))
+ 		hci_set_quirk(hdev, HCI_QUIRK_BROKEN_READ_TRANSMIT_POWER);
+ 
+ 	return 0;
+@@ -514,6 +521,7 @@ static const struct bcm_subver_table bcm_uart_subver_table[] = {
+ 	{ 0x4106, "BCM4335A0"	},	/* 002.001.006 */
+ 	{ 0x410c, "BCM43430B0"	},	/* 002.001.012 */
+ 	{ 0x2119, "BCM4373A0"	},	/* 001.001.025 */
++	{ 0x3032, "BCM4364B3"	},	/* 001.016.050 */
+ 	{ }
+ };
+ 
+@@ -683,6 +691,16 @@ int btbcm_initialize(struct hci_dev *hdev, bool *fw_load_done, bool use_autobaud
+ 			bt_dev_info(hdev, "BCM: Patch failed (%d)", err);
+ 
+ 		release_firmware(fw);
++	} else if (dmi_first_match(apple_t2_dmi)) {
++		/*
++		 * Apple T2 Macs run these UART controllers on ROM firmware and
++		 * ship no redistributable patchram, so the generic "brcm/BCM.hcd"
++		 * fallback is expected to be absent; the controller works without
++		 * it.  Do not report an error there.
++		 */
++		bt_dev_info(hdev, "BCM: firmware Patch file not found, tried:");
++		for (i = 0; i < fw_name_count; i++)
++			bt_dev_info(hdev, "BCM: '%s'", fw_name[i]);
+ 	} else {
+ 		bt_dev_err(hdev, "BCM: firmware Patch file not found, tried:");
+ 		for (i = 0; i < fw_name_count; i++)

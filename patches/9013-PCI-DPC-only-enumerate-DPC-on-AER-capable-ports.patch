@@ -1,0 +1,45 @@
+From: Jason Perlow <jperlow@gmail.com>
+Subject: [PATCH] PCI/DPC: only enumerate the DPC service on ports that can use AER
+
+97ca178c899d ("PCI/DPC: Allow DPC on all Downstream Ports when OS controls
+AER") made get_port_device_capability() advertise PCIE_PORT_SERVICE_DPC for
+any port that has a DPC capability as soon as the host bridge has native AER
+(host->native_aer), dropping the previous per-port AER test.  dpc_probe()
+still declines such a port with -ENOTSUPP when pcie_aer_is_native(pdev) is
+false, which for a port without an AER *capability* is always the case:
+
+    if (!pcie_aer_is_native(pdev) && !pcie_ports_dpc_native)
+            return -ENOTSUPP;
+
+On Apple T2 Macs (Intel Cannon Lake PCH, e.g. MacBookPro16,1) the chipset
+root ports expose DPC but are not AER-capable, so every boot logs an
+error-level line per port:
+
+    dpc 0000:00:1b.0:pcie008: probe with driver dpc failed with error -524
+    dpc 0000:00:1c.0:pcie008: probe with driver dpc failed with error -524
+
+(-524 is -ENOTSUPP.)  DPC is not enabled on those ports either way: the
+service device is created, the probe declines, and the device is left
+unbound, so nothing is lost by not creating it.
+
+Gate the DPC service on the same condition dpc_probe() needs: the port must
+have an AER capability so pcie_aer_is_native() can be true.  The
+pcie_ports=dpc-native override deliberately allows DPC without AER ownership
+and is preserved.
+
+Signed-off-by: Jason Perlow <jperlow@gmail.com>
+---
+diff --git a/drivers/pci/pcie/portdrv.c b/drivers/pci/pcie/portdrv.c
+index a9cbfc1..00127ba 100644
+--- a/drivers/pci/pcie/portdrv.c
++++ b/drivers/pci/pcie/portdrv.c
+@@ -264,7 +264,8 @@ static int get_port_device_capability(struct pci_dev *dev)
+ 	 */
+ 	if (pci_find_ext_capability(dev, PCI_EXT_CAP_ID_DPC) &&
+ 	    pci_aer_available() &&
+-	    (pcie_ports_dpc_native || host->native_aer))
++	    (pcie_ports_dpc_native ||
++	     (host->native_aer && dev->aer_cap)))
+ 		services |= PCIE_PORT_SERVICE_DPC;
+ 
+ 	/* Enable bandwidth control if more than one speed is supported. */

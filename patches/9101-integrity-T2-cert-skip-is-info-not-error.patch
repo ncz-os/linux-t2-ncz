@@ -1,0 +1,34 @@
+From: Jason Perlow <jperlow@gmail.com>
+Subject: [PATCH] integrity: T2 cert-skip quirk is informational, not an error
+
+load_uefi_certs() deliberately skips reading the UEFI db/dbx variables on
+Apple T2 Macs because doing so page-faults Apple's firmware and disables EFI
+runtime services (see the uefi_skip_cert quirk).  Taking that quirk is the
+intended, healthy path, yet it is reported at error level:
+
+    integrity: Reading UEFI Secure Boot Certs is not supported on T2 Macs.
+
+Every affected machine therefore logs a scary KERN_ERR line on every boot
+for something that is working exactly as designed.  Move it to pr_info:
+the condition is real but it is not a fault, and nothing depends on the
+level.  A boot with no Secure Boot certs loaded is normal on these systems.
+
+Not a suppression of a hardware error: this quirk only skips reading EFI
+variables that would crash the firmware.  Signing/signature enforcement is
+unchanged (and was never active on these machines).
+
+Signed-off-by: Jason Perlow <jperlow@gmail.com>
+---
+diff --git a/security/integrity/platform_certs/load_uefi.c b/security/integrity/platform_certs/load_uefi.c
+index c0d6948..1aecba7 100644
+--- a/security/integrity/platform_certs/load_uefi.c
++++ b/security/integrity/platform_certs/load_uefi.c
+@@ -169,7 +169,7 @@ static int __init load_uefi_certs(void)
+ 
+ 	dmi_id = dmi_first_match(uefi_skip_cert);
+ 	if (dmi_id) {
+-		pr_err("Reading UEFI Secure Boot Certs is not supported on T2 Macs.\n");
++		pr_info("Reading UEFI Secure Boot Certs is not supported on T2 Macs.\n");
+ 		return false;
+ 	}
+ 

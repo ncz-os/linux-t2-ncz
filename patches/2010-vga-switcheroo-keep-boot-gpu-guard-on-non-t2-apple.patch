@@ -1,0 +1,96 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jason Perlow <jperlow@gmail.com>
+Date: Sun, 12 Oct 2026 15:10:00 -0400
+Subject: [PATCH] vga_switcheroo: keep the boot-GPU guard on non-T2 Apple
+
+Patch 2009 ("apple-gmux: allow switching to igpu at probe") dropped the
+"pdev != vga_default_device()" guard from vga_switcheroo_client_probe_defer()
+so that on T2 Macs BOTH GPUs wait for the gmux before probing and the switch
+to the iGPU can happen at probe time.
+
+The guard, however, is what protected a machine whose APP000B (gmux) ACPI
+device exists but whose gmux is NOT functional.  apple_gmux_present() is only
+
+    acpi_dev_found("APP000B")
+
+so it is true even when apple-gmux's own apple_gmux_detect() later fails and
+gmux_probe() returns -ENODEV ("gmux device not present").  In that case no
+vga_switcheroo handler is ever registered, vgasr_priv.handler_flags stays 0,
+and with patch 2009 the sole/boot GPU is:
+
+    vga_switcheroo_client_probe_defer() -> true
+    i915_pci_probe()                    -> -EPROBE_DEFER (-517)
+    ... forever (no handler can ever appear)
+
+User-visible symptom: the machine boots, ssh works, but there is no /dev/dri
+and no /sys/class/drm/card*, so greetd's ExecCondition
+(/usr/local/bin/ncz-has-drm-output) fails and the greeter is skipped -- headless
+with no error.  Reproduced on Macmini5,1 (2011, Sandy Bridge HD 3000, ACPI
+APP000B present, in-kernel apple_gmux fails to bind).  It is NOT a generic
+Sandy Bridge problem: non-Apple machines do not expose APP000B, and T2 Macs'
+gmux (apple-gmux, or t2gmux from cix-installer post-install/56-t2-dkms.sh) does
+register a handler, so the deferral there resolves.
+
+Fix: keep the patch-2009 relaxation only where a handler really does arrive
+(T2, identified by the Apple T2 bridge PCI device 106b:1801 every T2 Mac has
+before the GPU drivers probe); everywhere else restore the upstream boot-GPU
+guard.  Non-T2 dual-GPU Macs with a working gmux are unaffected: their inactive
+GPU still defers exactly as upstream, and the boot GPU probes immediately as
+upstream.
+
+Fixes: 2009-apple-gmux-allow-switching-to-igpu-at-probe.patch
+Signed-off-by: Jason Perlow <jperlow@gmail.com>
+---
+ drivers/gpu/vga/vga_switcheroo.c | 19 ++++++++++---------
+ 1 file changed, 12 insertions(+), 7 deletions(-)
+
+--- a/drivers/gpu/vga/vga_switcheroo.c
++++ b/drivers/gpu/vga/vga_switcheroo.c
+@@ -420,6 +420,25 @@
+ 		if (client->active)
+ 			return client;
+ 	return NULL;
++}
++
++/*
++ * Apple firmware advertises the APP000B (gmux) ACPI device on machines whose
++ * gmux is not functional (e.g. the single-GPU Macmini5,1).  There
++ * apple_gmux_present() is true -- it is only acpi_dev_found("APP000B") -- but
++ * apple-gmux's probe fails, so no vga_switcheroo handler is ever registered.
++ * The Apple T2 bridge is the reliable "a handler really does arrive" signal
++ * for the machines the relaxed defer below was added for.
++ */
++static bool apple_t2_present(void)
++{
++	struct pci_dev *pdev;
++
++	pdev = pci_get_device(PCI_VENDOR_ID_APPLE, 0x1801, NULL);
++	if (!pdev)
++		return false;
++	pci_dev_put(pdev);
++	return true;
+ }
+ 
+ /**
+@@ -436,7 +455,20 @@
+ bool vga_switcheroo_client_probe_defer(struct pci_dev *pdev)
+ {
+ 	if (pci_is_display(pdev)) {
+-		if (apple_gmux_present() && !vgasr_priv.handler_flags)
++		/*
++		 * apple-gmux is needed on pre-retina MacBook Pro to probe the
++		 * panel if pdev is the inactive GPU.
++		 *
++		 * On the T2 Macs this relaxation was added for, the gmux
++		 * handler really does register, so both GPUs may wait for it.
++		 * Elsewhere keep the upstream guard: a present-but-dead APP000B
++		 * (behind which no handler ever appears) must not starve the
++		 * boot GPU.  Without it i915 defers forever on e.g. Macmini5,1
++		 * -- no /dev/dri, no DRM connector, greetd skipped: headless
++		 * with no error.
++		 */
++		if (apple_gmux_present() && !vgasr_priv.handler_flags &&
++		    (pdev != vga_default_device() || apple_t2_present()))
+ 			return true;
+ 	}
+ 
