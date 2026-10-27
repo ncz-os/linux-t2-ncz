@@ -43,11 +43,11 @@ apt-get install -y lsb-release
 #   T2_ARTIFACTS_DIR   directory the .deb packages, the saved .config and
 #                      PROVENANCE are written to (default /tmp/artifacts).
 #                      Override to a disk-backed directory.
-KERNEL_VERSION="${KERNEL_VERSION:-7.3-rc7}"
+KERNEL_VERSION="${KERNEL_VERSION:-7.3}"
 SKIP_PATCHES="${SKIP_PATCHES:-}"
 KERNEL_REF="${KERNEL_REF:-v${KERNEL_VERSION}}"
 PKGREL="${PKGREL:-2}"
-REQUIRE_PRERELEASE="${REQUIRE_PRERELEASE:-1}"
+REQUIRE_PRERELEASE="${REQUIRE_PRERELEASE:-0}"
 DISTRO=$(lsb_release -i | cut -d ":" -f 2 | xargs)
 CODENAME=$(lsb_release -c | cut -d ":" -f 2 | xargs)
 T2_LOCALVERSION="${T2_LOCALVERSION:--t2-ncz}"

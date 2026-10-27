@@ -22,3 +22,4 @@
 9102-bluetooth-btbcm-identify-BCM4364B3-and-quiet-T2-rom-patchram.patch
 9503-wifi-brcmfmac-handle-missing-D3-ACK-on-BCM4377-T2-Macs.patch
 9504-HID-apple-touchbar-avoid-nested-runtime-PM-in-PM-callbacks.patch
+9506-wifi-brcmfmac-map-RX-packet-IDs-bidirectional.patch

@@ -1,0 +1,58 @@
+kernel_release=7.3.0-t2-ncz
+kernel_ref=v7.3
+kernel_repository=https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
+source_commit=c03c1a14507dfaf8b856c2608f9ac216021fc222
+package_version=7.3.0-2
+config=config/kernel_config_7.3.0-t2-ncz
+shipped_artifacts=SHIPPED-ARTIFACTS.sha256
+
+# The build that produced 7.3.0-2 applied 24 patches and recorded the sha256 of
+# each one. 23 of the 24 files in patches/ are byte-identical to that record.
+# The exception is disclosed here rather than papered over:
+patch_sha_mismatch=9506-wifi-brcmfmac-map-RX-packet-IDs-bidirectional.patch
+  shipped_build_sha256=19342993d4a26c7296e292f810c2c07fe5f5dcab1948f812ed1840b1befd96a8
+  this_tree_sha256=86fad982510813a92ec6e562b35a12a6c2c09c4959759cb665996aa1ab67a3ff
+  reason=the build that shipped 7.3.0-2 used a later revision of this patch than
+         the one committed in the driver repository; its exact bytes were not
+         preserved (the build work tree was cleaned).
+  remedy=the next T2 kernel build must be made from THIS tree, so that the
+         published source and the shipped binary correspond byte for byte.
+
+# Open question, recorded rather than guessed: build.sh requires
+# 9011-PCI-AER-skip-ANFE-unmask-on-Apple-T2-SEP.patch to exist, and it is in
+# this tree, but the shipped build's log recorded 24 applied patches and 9011
+# is not one of them. The patch is kept in patches/ and listed in patches/series
+# so nothing is dropped from the record; the next build must confirm whether it
+# is applied or skipped, and say which.
+patches:
+# Open question, recorded rather than guessed: build.sh requires
+# 9011-PCI-AER-skip-ANFE-unmask-on-Apple-T2-SEP.patch to exist, and it is in
+# this tree, but the shipped build's log recorded 24 applied patches and 9011
+# is not one of them. The patch is kept in patches/ and listed in patches/series
+# so nothing is dropped from the record; the next build must confirm whether it
+# is applied or skipped, and say which.
+patches:
+41e01f7cc0a5cc6b067470b941c7bbe385f6594731e8f234089e4143cb71c50f  ./1001-Add-t2bce-driver-stack.patch
+9cf00f195f4844ecb1490cd2cedc0d4b57d8d33886409edebca06cd59487c221  ./1002-Integrate-t2bce-driver-stack.patch
+06a46817309ef8e34cc1b57d0ab389589c2c65cda68b384826334e67dd74e257  ./1003-t2bce-ave-handle-ERR_PTR-core-device.patch
+81360fed61d5fd0ba5a1b762d6735d62cbf509682433ca46bec08543eaef86bc  ./2008-i915-4-lane-quirk-for-mbp15-1.patch
+39ccdf7184af930da5059433663095e0b1d27ba0a7689d49f060648046e23979  ./2009-apple-gmux-allow-switching-to-igpu-at-probe.patch
+74e6742a962bbac0e62fa8737770a8095da3bc00d11c98c1289e149912662f0b  ./2010-vga-switcheroo-keep-boot-gpu-guard-on-non-t2-apple.patch
+46e608d2dfab32edbdc129154f8b2e609806cd2d59aee37f1c165690b8af943c  ./4001-asahi-trackpad.patch
+2cb673732b0b4ee42b4975976ddabb0004b17cc227428aa95b344d6402b0b3d9  ./4003-HID-apple-ignore-the-trackpad-on-T2-Macs.patch
+9149dbb65ff9e1c8a1b1c8ab97d90fd06b28b7b6dd3f4ad82a58fa810d74864d  ./4004-HID-magicmouse-Add-support-for-trackpads-found-on-T2.patch
+295e434e300bccdba0b3dd89ba6e9552dd3081b94affa3c6d4aa2ba2f1dc217d  ./5001-HID-appletb-kbd-add-option-to-switch-default-layer-o.patch
+3456b9669360b940bd10b7e986f0ab547121e7db4dfd903dbd097a603d5abdb2  ./5002-drm-appletbdrm-Add-suspend-and-resume-support.patch
+97aa72564a6e994460a10fdfd6419fc38ed884cbae323a621e08cfe9037c74d1  ./6001-drm-amd-pm-Fix-boot-problems-in-5300.patch
+ea9daa4d22462c0b130af7430741472597274d843913d3abe540c821235beccc  ./6002-drm-amd-pm-defer-UCLK-DPM-on-Apple-0218.patch
+061e6c3a56a3e5b868d6466f1b7d6dff600ac209e9aff17fdb78a84b5da2f2d8  ./7001-drm-i915-fbdev-Discard-BIOS-framebuffers-exceeding-h.patch
+0d4fe35fcc2e33a63fe62673b60d391a35a5cd5968f037d5a422770711684c9a  ./8001-Add-APFS-driver.patch
+2d41253fed716d86f06dde1c66b85c8dd4ec8c450c6b6d6f3cad09685dddf2c1  ./8002-Necessary-modifications-to-build-APFS-with-the-kerne.patch
+9afa59adadaf8bb24d28aa1810c248c410e1b8c2903c805a009f8e4edd5fd49a  ./9001-ACPI-x86-Apple-T2-systems-need-early-CPU-offlining.patch
+a2290c0630f8832a93b37e75abb9d3cfa948eab26a39ed7f2dfc691c089e10eb  ./9002-Bluetooth-hci_event-strip-Broadcom-vendor-bits-from-adv-type.patch
+6b24f6ab7815ae3ae6e36e40a9eb615947efe15b81ff9cc615107ea44d97d9bb  ./9013-PCI-DPC-only-enumerate-DPC-on-AER-capable-ports.patch
+56642faeea57ba2777ec43a109b5bc2d4790d9e3ddeb8c9cfe434ea4ad985ed7  ./9101-integrity-T2-cert-skip-is-info-not-error.patch
+4c1344f50feca82c343c9afeb4e8100eea39096f940a8d333b6025f950d17c72  ./9102-bluetooth-btbcm-identify-BCM4364B3-and-quiet-T2-rom-patchram.patch
+288c8ba508ae554d40ba993edd747966f5b80e6b672e53cb8ef80580dd0468ed  ./9503-wifi-brcmfmac-handle-missing-D3-ACK-on-BCM4377-T2-Macs.patch
+dddce91f2e9fa2a0122ce20aa0be21e56bb38ada9568ed6e35caea9eada545a3  ./9504-HID-apple-touchbar-avoid-nested-runtime-PM-in-PM-callbacks.patch
+19342993d4a26c7296e292f810c2c07fe5f5dcab1948f812ed1840b1befd96a8  ./9506-wifi-brcmfmac-map-RX-packet-IDs-bidirectional.patch
